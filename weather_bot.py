@@ -4,13 +4,17 @@ from openai import OpenAI
 import json
 from flask import Flask, request, jsonify, render_template_string, session
 import uuid
+from urllib.parse import urljoin
 
 # Load environment variables
 load_dotenv()
 
-# Initialize Flask app
+# Initialize Flask app with subdirectory support
 app = Flask(__name__)
-app.secret_key = os.urandom(24)  # 为session设置密钥
+app.secret_key = os.urandom(24)
+
+# Get the base URL from environment, ensuring it ends with a slash
+API_BASE_URL = os.getenv('API_BASE_URL', '').rstrip('/') + '/'
 
 # Initialize OpenAI client
 client = OpenAI(
@@ -240,14 +244,16 @@ LANDING_PAGE_HTML = """
         const API_CONFIG = {
             baseUrl: document.querySelector('meta[name="api-base-url"]')?.content || window.location.origin,
             endpoints: {
-                test: '/api/test',
-                updateTools: '/api/update-tools'
+                test: 'api/test',
+                updateTools: 'api/update-tools'
             }
         };
 
         // 统一的 API 调用处理函数
         async function callApi(endpoint, data = null, options = {}) {
-            const url = new URL(API_CONFIG.endpoints[endpoint], API_CONFIG.baseUrl).toString();
+            // 确保baseUrl末尾有斜杠
+            const baseUrl = API_CONFIG.baseUrl.endsWith('/') ? API_CONFIG.baseUrl : API_CONFIG.baseUrl + '/';
+            const url = new URL(API_CONFIG.endpoints[endpoint], baseUrl).toString();
             const defaultOptions = {
                 headers: {
                     'Content-Type': 'application/json'
@@ -272,7 +278,7 @@ LANDING_PAGE_HTML = """
 
                 return responseData;
             } catch (error) {
-                console.error(`API调用失败 (${endpoint}):`, error);
+                console.error(`API调用失败 (${endpoint}):`, error, '请求URL:', url);
                 throw error;
             }
         }
@@ -453,9 +459,6 @@ def process_function_test(query: str):
 @app.route('/')
 def index():
     """Landing page with API documentation"""
-    # 从环境变量获取 API 基础 URL，如果没有设置则使用当前域名
-    api_base_url = os.getenv('API_BASE_URL', '')
-    
     # 确保在渲染页面时提供格式化好的 JSON
     tools = get_session_tools()
     formatted_json = json.dumps(tools, indent=2)
@@ -464,7 +467,7 @@ def index():
         LANDING_PAGE_HTML,
         tools=tools,
         tools_json=formatted_json,
-        api_base_url=api_base_url
+        api_base_url=API_BASE_URL
     )
 
 @app.route('/api/test', methods=['POST'])
@@ -522,4 +525,5 @@ def internal_error(e):
     return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == "__main__":
+    print(f"API Base URL: {API_BASE_URL}")
     app.run(host='0.0.0.0', port=5001, debug=True)
