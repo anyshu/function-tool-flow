@@ -2,13 +2,15 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 import json
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session
+import uuid
 
 # Load environment variables
 load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
+app.secret_key = os.urandom(24)  # 为session设置密钥
 
 # Initialize OpenAI client
 client = OpenAI(
@@ -65,6 +67,7 @@ LANDING_PAGE_HTML = """
 <html>
 <head>
     <title>Function Tool Tester</title>
+    <meta name="api-base-url" content="{{ api_base_url }}">
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -233,7 +236,158 @@ LANDING_PAGE_HTML = """
     </div>
 
     <script>
-        // 动态更新工具列表
+        // API 配置
+        const API_CONFIG = {
+            baseUrl: document.querySelector('meta[name="api-base-url"]')?.content || window.location.origin,
+            endpoints: {
+                test: '/api/test',
+                updateTools: '/api/update-tools'
+            }
+        };
+
+        // 统一的 API 调用处理函数
+        async function callApi(endpoint, data = null, options = {}) {
+            const url = new URL(API_CONFIG.endpoints[endpoint], API_CONFIG.baseUrl).toString();
+            const defaultOptions = {
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            };
+
+            try {
+                const response = await fetch(url, {
+                    ...defaultOptions,
+                    ...options,
+                    ...(data ? { 
+                        method: 'POST',
+                        body: JSON.stringify(data)
+                    } : {})
+                });
+
+                const responseData = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(responseData.error || '请求失败');
+                }
+
+                return responseData;
+            } catch (error) {
+                console.error(`API调用失败 (${endpoint}):`, error);
+                throw error;
+            }
+        }
+
+        // 初始化配置
+        function initializeApi() {
+            // 从页面 meta 标签或环境变量中获取配置
+            const apiBaseUrl = document.querySelector('meta[name="api-base-url"]')?.content;
+            if (apiBaseUrl) {
+                API_CONFIG.baseUrl = apiBaseUrl;
+            }
+
+            // 记录当前配置
+            console.log('API Configuration:', API_CONFIG);
+        }
+
+        // 格式化 JSON 并更新文本框
+        function formatAndUpdateTools() {
+            const toolsDefinition = document.getElementById('toolsDefinition');
+            try {
+                const toolsData = JSON.parse(toolsDefinition.value);
+                const formattedJson = JSON.stringify(toolsData, null, 2);
+                
+                // 保存当前状态
+                const scrollTop = toolsDefinition.scrollTop;
+                const selectionStart = toolsDefinition.selectionStart;
+                const selectionEnd = toolsDefinition.selectionEnd;
+                
+                // 更新文本框内容
+                toolsDefinition.value = formattedJson;
+                
+                // 恢复状态
+                toolsDefinition.scrollTop = scrollTop;
+                toolsDefinition.selectionStart = selectionStart;
+                toolsDefinition.selectionEnd = selectionEnd;
+            } catch (error) {
+                console.error('JSON格式化失败:', error);
+            }
+        }
+
+        async function sendQuery() {
+            const query = document.getElementById('queryInput').value;
+            const modelResponse = document.getElementById('modelResponse');
+            const functionCalls = document.getElementById('functionCalls');
+            
+            modelResponse.innerHTML = '处理中...';
+            functionCalls.innerHTML = '处理中...';
+            
+            try {
+                const data = await callApi('test', { query });
+                modelResponse.innerHTML = `<pre>${data.model_message || '无响应'}</pre>`;
+                functionCalls.innerHTML = `<pre>${JSON.stringify(data.function_calls || [], null, 2)}</pre>`;
+            } catch (error) {
+                modelResponse.innerHTML = `<pre class="error">错误：${error.message}</pre>`;
+                functionCalls.innerHTML = `<pre class="error">错误：${error.message}</pre>`;
+            }
+        }
+
+        async function updateTools() {
+            const toolsDefinition = document.getElementById('toolsDefinition');
+            const resultElement = document.getElementById('updateResult');
+            
+            try {
+                const toolsData = JSON.parse(toolsDefinition.value);
+                
+                // 保存当前状态
+                const scrollTop = toolsDefinition.scrollTop;
+                const selectionStart = toolsDefinition.selectionStart;
+                const selectionEnd = toolsDefinition.selectionEnd;
+                
+                const data = await callApi('updateTools', { tools: toolsData });
+                
+                resultElement.className = 'success';
+                resultElement.textContent = '更新成功！';
+                
+                // 格式化并更新显示
+                const formattedJson = JSON.stringify(toolsData, null, 2);
+                toolsDefinition.value = formattedJson;
+                
+                // 恢复状态
+                toolsDefinition.scrollTop = scrollTop;
+                toolsDefinition.selectionStart = selectionStart;
+                toolsDefinition.selectionEnd = selectionEnd;
+                
+                // 更新工具列表
+                updateToolsList(toolsData);
+            } catch (error) {
+                resultElement.className = 'error';
+                resultElement.textContent = '更新失败：' + error.message;
+            }
+        }
+
+        // 页面加载时初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeApi();
+            
+            // 初始化时格式化 Tools 定义
+            formatAndUpdateTools();
+            
+            const textarea = document.getElementById('toolsDefinition');
+            
+            // 处理tab键
+            textarea.addEventListener('keydown', function(e) {
+                if (e.key === 'Tab') {
+                    e.preventDefault();
+                    const start = this.selectionStart;
+                    const end = this.selectionEnd;
+                    
+                    this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
+                    this.selectionStart = this.selectionEnd = start + 2;
+                }
+            });
+        });
+
+        // 格式化工具列表显示
         function updateToolsList(tools) {
             const container = document.querySelector('.tools-container');
             let html = '';
@@ -251,110 +405,17 @@ LANDING_PAGE_HTML = """
             
             container.innerHTML = html;
         }
-
-        async function updateTools() {
-            const toolsDefinition = document.getElementById('toolsDefinition');
-            const resultElement = document.getElementById('updateResult');
-            
-            try {
-                // 验证 JSON 格式
-                const toolsData = JSON.parse(toolsDefinition.value);
-                
-                const response = await fetch('/api/update-tools', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ tools: toolsData })
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok) {
-                    resultElement.className = 'success';
-                    resultElement.textContent = '更新成功！';
-                    
-                    // 格式化 JSON
-                    const formattedJson = JSON.stringify(toolsData, null, 2);
-                    
-                    // 保存当前滚动位置和选择位置
-                    const scrollTop = toolsDefinition.scrollTop;
-                    const selectionStart = toolsDefinition.selectionStart;
-                    const selectionEnd = toolsDefinition.selectionEnd;
-                    
-                    // 更新文本框内容
-                    toolsDefinition.value = formattedJson;
-                    
-                    // 恢复滚动位置和选择位置
-                    toolsDefinition.scrollTop = scrollTop;
-                    toolsDefinition.selectionStart = selectionStart;
-                    toolsDefinition.selectionEnd = selectionEnd;
-                    
-                    // 动态更新工具列表
-                    updateToolsList(toolsData);
-                } else {
-                    throw new Error(data.error || '更新失败');
-                }
-            } catch (error) {
-                resultElement.className = 'error';
-                resultElement.textContent = '更新失败：' + error.message;
-            }
-        }
-
-        // 页面加载完成后的初始化
-        document.addEventListener('DOMContentLoaded', function() {
-            const textarea = document.getElementById('toolsDefinition');
-            
-            // 处理tab键
-            textarea.addEventListener('keydown', function(e) {
-                if (e.key === 'Tab') {
-                    e.preventDefault();
-                    const start = this.selectionStart;
-                    const end = this.selectionEnd;
-                    
-                    // 插入两个空格作为缩进
-                    this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
-                    this.selectionStart = this.selectionEnd = start + 2;
-                }
-            });
-        });
-
-        async function sendQuery() {
-            const query = document.getElementById('queryInput').value;
-            const modelResponse = document.getElementById('modelResponse');
-            const functionCalls = document.getElementById('functionCalls');
-            
-            modelResponse.innerHTML = '处理中...';
-            functionCalls.innerHTML = '处理中...';
-            
-            try {
-                const response = await fetch('/api/test', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ query: query })
-                });
-                const data = await response.json();
-                
-                if (response.ok) {
-                    modelResponse.innerHTML = `<pre>${data.model_message || '无响应'}</pre>`;
-                    functionCalls.innerHTML = `<pre>${JSON.stringify(data.function_calls || [], null, 2)}</pre>`;
-                } else {
-                    throw new Error(data.error || '请求失败');
-                }
-            } catch (error) {
-                modelResponse.innerHTML = `<pre class="error">错误：${error.message}</pre>`;
-                functionCalls.innerHTML = `<pre class="error">错误：${error.message}</pre>`;
-            }
-        }
     </script>
 </body>
-</html>
-"""
+</html>"""
 
-# Global variable to store functions
-current_functions = DEFAULT_FUNCTIONS.copy()
+def get_session_tools():
+    """Get tools definition for current session"""
+    if 'session_id' not in session:
+        session['session_id'] = str(uuid.uuid4())
+    if 'tools' not in session:
+        session['tools'] = DEFAULT_FUNCTIONS.copy()
+    return session['tools']
 
 def process_function_test(query: str):
     """Process the query and return model's response without executing functions"""
@@ -367,7 +428,7 @@ def process_function_test(query: str):
         response = client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL"),
             messages=messages,
-            tools=current_functions,
+            tools=get_session_tools(),  # 使用会话中的tools定义
             tool_choice="auto"
         )
 
@@ -392,10 +453,18 @@ def process_function_test(query: str):
 @app.route('/')
 def index():
     """Landing page with API documentation"""
+    # 从环境变量获取 API 基础 URL，如果没有设置则使用当前域名
+    api_base_url = os.getenv('API_BASE_URL', '')
+    
+    # 确保在渲染页面时提供格式化好的 JSON
+    tools = get_session_tools()
+    formatted_json = json.dumps(tools, indent=2)
+    
     return render_template_string(
         LANDING_PAGE_HTML,
-        tools=current_functions,
-        tools_json=json.dumps(current_functions, indent=2)
+        tools=tools,
+        tools_json=formatted_json,
+        api_base_url=api_base_url
     )
 
 @app.route('/api/test', methods=['POST'])
@@ -435,9 +504,8 @@ def update_tools():
             if not isinstance(tool, dict) or 'type' not in tool or 'function' not in tool:
                 return jsonify({'error': 'Invalid tool definition structure'}), 400
         
-        # Update the global functions
-        global current_functions
-        current_functions = new_tools
+        # 更新会话中的tools定义
+        session['tools'] = new_tools
         return jsonify({'message': 'Tools updated successfully'})
     except Exception as e:
         app.logger.error(f"Error updating tools: {str(e)}")
